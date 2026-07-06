@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,50 +42,119 @@ var (
 
 const tickInterval = time.Second / 10
 
+const warmupSamples = 3
+
 type tickMsg time.Time
 
 func tickCmd(t time.Time) tea.Msg {
 	return tickMsg(t)
 }
 
+type Phase int
+
+const (
+	downloadPhase Phase = iota
+	uploadPhase
+)
+
+type ProbeFunc func(context.Context, string, *atomic.Int64)
+
+type ModelConfig struct {
+	Duration      time.Duration
+	TickInterval  time.Duration
+	Now           func() time.Time
+	DownloadProbe ProbeFunc
+	UploadProbe   ProbeFunc
+	Simultaneous  bool
+}
+
+type PhaseStats struct {
+	bytes  *atomic.Int64
+	start  time.Time
+	total  int64
+	base   int64
+	baseAt time.Time
+	speed  float64
+	speeds []float64
+	count  int
+	peak   float64
+}
+
 type Model struct {
 	targets []string
+	config  ModelConfig
 
-	bytes  *atomic.Int64
+	download PhaseStats
+	upload   PhaseStats
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	start  time.Time
-	speed  float64
-	speeds []float64
-	peak   float64
-
+	active   Phase
 	done     bool
 	quitting bool
 }
 
-func NewModel(targets []string) Model {
-	ctx, cancel := context.WithTimeout(context.Background(), duration)
-
-	return Model{
-		targets: targets,
-		bytes:   &atomic.Int64{},
-		ctx:     ctx,
-		cancel:  cancel,
-		start:   time.Now(),
+func NewModel(targets []string, configs ...ModelConfig) Model {
+	config := defaultModelConfig()
+	if len(configs) > 0 {
+		config = mergeModelConfig(config, configs[0])
 	}
+
+	m := Model{
+		targets: targets,
+		config:  config,
+	}
+	m.resetStats()
+	m.resetContext()
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(tea.Tick(tickInterval, tickCmd), m.measure)
+	if m.config.Simultaneous {
+		return tea.Batch(
+			tea.Tick(m.config.TickInterval, tickCmd),
+			m.startMeasurement(downloadPhase),
+			m.startMeasurement(uploadPhase),
+		)
+	}
+
+	return tea.Batch(
+		tea.Tick(m.config.TickInterval, tickCmd),
+		m.startMeasurement(downloadPhase),
+	)
 }
 
-// measure kicks off the parallel downloads that feed our byte counter.
-func (m Model) measure() tea.Msg {
-	for _, url := range m.targets {
-		go download(m.ctx, url, m.bytes)
+func defaultModelConfig() ModelConfig {
+	return ModelConfig{
+		Duration:      duration,
+		TickInterval:  tickInterval,
+		Now:           time.Now,
+		DownloadProbe: download,
+		UploadProbe:   upload,
 	}
-	return nil
+}
+
+func mergeModelConfig(base, override ModelConfig) ModelConfig {
+	if override.Duration > 0 {
+		base.Duration = override.Duration
+	}
+	if override.TickInterval > 0 {
+		base.TickInterval = override.TickInterval
+	}
+	if override.Now != nil {
+		base.Now = override.Now
+	}
+	if override.DownloadProbe != nil {
+		base.DownloadProbe = override.DownloadProbe
+	}
+	if override.UploadProbe != nil {
+		base.UploadProbe = override.UploadProbe
+	}
+	if override.Simultaneous {
+		base.Simultaneous = true
+	}
+	return base
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -91,25 +163,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "esc", "ctrl+c":
 			m.quitting = true
-			m.cancel()
+			m.stopPhase()
 			return m, tea.Quit
 		}
 
 	case tickMsg:
-		elapsed := time.Since(m.start)
-		m.speed = mbps(m.bytes.Load(), elapsed)
-		m.speeds = append(m.speeds, m.speed)
-		if m.speed > m.peak {
-			m.peak = m.speed
+		if m.done {
+			return m, nil
 		}
 
-		if elapsed >= duration {
+		now := time.Time(msg)
+		m.sample(now)
+		if m.phaseElapsed(now) >= m.config.Duration {
+			m.stopPhase()
+			if !m.config.Simultaneous && m.active == downloadPhase {
+				m.active = uploadPhase
+				m.resetContext()
+				m.upload.start = now
+				return m, tea.Batch(
+					tea.Tick(m.config.TickInterval, tickCmd),
+					m.startMeasurement(uploadPhase),
+				)
+			}
+
 			m.done = true
-			m.cancel()
 			return m, tea.Quit
 		}
 
-		return m, tea.Tick(tickInterval, tickCmd)
+		return m, tea.Tick(m.config.TickInterval, tickCmd)
 	}
 
 	return m, nil
@@ -121,22 +202,11 @@ func (m Model) View() string {
 	}
 
 	var s strings.Builder
-	// Cap each readout at 999.9 and switch to Gbps beyond that, keeping a fixed
-	// width so the unit, sparkline, and peak never shift horizontally.
-	speed, unit := scale(m.speed)
-	s.WriteString(speedStyle.Render(fmt.Sprintf("%5.1f", speed)))
-	s.WriteString(unitStyle.Render(" " + unit))
-	s.WriteString(" ")
-	s.WriteString(sparkStyle.Render(sparkline(m.speeds, m.peak, sparkWidth)))
-	if m.peak > 0 {
-		peak, peakUnit := scale(m.peak)
-		label := fmt.Sprintf("  peak %.0f", peak)
-		// Only label the peak's unit when it differs from the live reading's.
-		if peakUnit != unit {
-			label += " " + peakUnit
-		}
-		s.WriteString(peakStyle.Render(label))
-	}
+	s.WriteString("download ")
+	s.WriteString(m.renderStats(m.download))
+	s.WriteString("\n\n")
+	s.WriteString("upload   ")
+	s.WriteString(m.renderStats(m.upload))
 
 	style := baseStyle
 	if m.done {
@@ -145,7 +215,127 @@ func (m Model) View() string {
 	return style.Render(s.String())
 }
 
-// mbps converts a number of bytes downloaded over a duration into megabits per
+func (m *Model) resetStats() {
+	now := m.config.Now()
+	m.download = PhaseStats{
+		bytes: &atomic.Int64{},
+		start: now,
+	}
+	m.upload = PhaseStats{
+		bytes: &atomic.Int64{},
+		start: now,
+	}
+	m.active = downloadPhase
+}
+
+func (m *Model) resetContext() {
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+}
+
+func (m *Model) sample(now time.Time) {
+	if m.config.Simultaneous {
+		sampleStats(&m.download, now)
+		sampleStats(&m.upload, now)
+		return
+	}
+
+	if m.active == downloadPhase {
+		sampleStats(&m.download, now)
+		return
+	}
+	sampleStats(&m.upload, now)
+}
+
+func sampleStats(stats *PhaseStats, now time.Time) {
+	total := stats.bytes.Load()
+	stats.count++
+	stats.total = total
+
+	if stats.count <= warmupSamples {
+		stats.speed = mbps(total, now.Sub(stats.start))
+		if stats.count == warmupSamples {
+			stats.base = total
+			stats.baseAt = now
+		}
+		stats.speeds = append(stats.speeds, stats.speed)
+		return
+	}
+
+	bytes := total - stats.base
+	if bytes < 0 {
+		bytes = 0
+	}
+
+	stats.speed = mbps(bytes, now.Sub(stats.baseAt))
+	stats.speeds = append(stats.speeds, stats.speed)
+	if stats.speed > stats.peak {
+		stats.peak = stats.speed
+	}
+}
+
+func (m Model) phaseElapsed(now time.Time) time.Duration {
+	if m.config.Simultaneous || m.active == downloadPhase {
+		return now.Sub(m.download.start)
+	}
+	return now.Sub(m.upload.start)
+}
+
+func (m *Model) stopPhase() {
+	if m.cancel != nil {
+		m.cancel()
+	}
+}
+
+func (m *Model) startMeasurement(phase Phase) tea.Cmd {
+	probe := m.config.DownloadProbe
+	bytes := m.download.bytes
+	if phase == uploadPhase {
+		probe = m.config.UploadProbe
+		bytes = m.upload.bytes
+	}
+	targets := m.measurementTargets(phase)
+	ctx := m.ctx
+
+	return func() tea.Msg {
+		var wg sync.WaitGroup
+		for _, url := range targets {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				probe(ctx, url, bytes)
+			}()
+		}
+		wg.Wait()
+		return nil
+	}
+}
+
+func (m Model) measurementTargets(phase Phase) []string {
+	return append([]string(nil), m.targets...)
+}
+
+func (m Model) renderStats(stats PhaseStats) string {
+	// Cap each readout at 999.9 and switch to Gbps beyond that, keeping a fixed
+	// width so the unit, sparkline, and peak never shift horizontally.
+	speed, unit := scale(stats.speed)
+	var s strings.Builder
+	s.WriteString(speedStyle.Render(fmt.Sprintf("%5.1f", speed)))
+	s.WriteString(unitStyle.Render(" " + unit))
+	s.WriteString(" ")
+	s.WriteString(sparkStyle.Render(sparkline(stats.speeds, stats.peak, sparkWidth)))
+	if stats.peak > 0 {
+		peak, peakUnit := scale(stats.peak)
+		label := fmt.Sprintf("  peak %.0f", peak)
+		// Only label the peak's unit when it differs from the live reading's.
+		if peakUnit != unit {
+			label += " " + peakUnit
+		}
+		s.WriteString(peakStyle.Render(label))
+	}
+	return s.String()
+}
+
+// mbps converts a number of bytes transferred over a duration into megabits per
 // second, the unit fast.com reports.
 func mbps(bytes int64, d time.Duration) float64 {
 	if d <= 0 {
@@ -164,6 +354,14 @@ func scale(speed float64) (float64, string) {
 }
 
 func main() {
+	config, err := configFromArgs(os.Args[1:], os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	urls, err := targets(connections)
 	if err != nil {
 		var netErr net.Error
@@ -174,7 +372,17 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if _, err := tea.NewProgram(NewModel(urls)).Run(); err != nil {
+	if _, err := tea.NewProgram(NewModel(urls, config)).Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func configFromArgs(args []string, output io.Writer) (ModelConfig, error) {
+	flags := flag.NewFlagSet("fast", flag.ContinueOnError)
+	flags.SetOutput(output)
+	simultaneous := flags.Bool("simultaneous", false, "measure download and upload at the same time")
+	if err := flags.Parse(args); err != nil {
+		return ModelConfig{}, err
+	}
+	return ModelConfig{Simultaneous: *simultaneous}, nil
 }

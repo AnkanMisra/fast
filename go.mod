@@ -1,4 +1,4 @@
-module github.com/maaslalani/fast
+module github.com/AnkanMisra/fast
 
 go 1.26.3
 

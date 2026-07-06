@@ -18,6 +18,7 @@ var dots = [4][2]byte{
 func sparkline(values []float64, peak float64, width int) string {
 	cols, rows := width*2, 4
 	cells := make([]byte, width)
+	values = trimLeadingZeroes(values)
 
 	if len(values) > 1 && peak > 0 {
 		for px := range cols {
@@ -31,6 +32,12 @@ func sparkline(values []float64, peak float64, width int) string {
 			}
 
 			height := int(v/peak*float64(rows) + 0.5)
+			if height < 0 {
+				height = 0
+			}
+			if height > rows {
+				height = rows
+			}
 			for y := rows - height; y < rows; y++ {
 				cells[px/2] |= dots[y][px%2]
 			}
@@ -46,4 +53,11 @@ func sparkline(values []float64, peak float64, width int) string {
 		}
 	}
 	return b.String()
+}
+
+func trimLeadingZeroes(values []float64) []float64 {
+	for len(values) > 1 && values[0] <= 0 {
+		values = values[1:]
+	}
+	return values
 }

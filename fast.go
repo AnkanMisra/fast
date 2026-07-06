@@ -6,17 +6,27 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // fallbackToken is used when we can't extract a fresh token from the fast.com
 // JavaScript bundle. It rarely changes, so this is usually good enough.
 const fallbackToken = "YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm"
 
+const uploadPayloadBytes = 1 * 1024 * 1024
+
+const requestTimeout = 15 * time.Second
+
+var httpClient = &http.Client{Timeout: requestTimeout}
+
 var (
 	scriptExpr = regexp.MustCompile(`app-[a-z0-9]+\.js`)
 	tokenExpr  = regexp.MustCompile(`token:"(\w+)"`)
+	rangeExpr  = regexp.MustCompile(`/range/[^/]*`)
 )
 
 // token extracts the API token from the fast.com JavaScript bundle. fast.com
@@ -75,13 +85,43 @@ func download(ctx context.Context, url string, total *atomic.Int64) {
 			return
 		}
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return
 		}
 
-		io.Copy(counter{total}, resp.Body)
-		resp.Body.Close()
+		_, _ = io.Copy(counter{total}, resp.Body)
+		_ = resp.Body.Close()
+	}
+}
+
+func upload(ctx context.Context, rawURL string, total *atomic.Int64) {
+	uploadURL, err := uploadURL(rawURL)
+	if err != nil {
+		return
+	}
+
+	for ctx.Err() == nil {
+		req, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodPost,
+			uploadURL,
+			io.NopCloser(io.LimitReader(uploadCounter{total: total}, uploadPayloadBytes)),
+		)
+		if err != nil {
+			return
+		}
+
+		req.ContentLength = uploadPayloadBytes
+		req.Header.Set("Content-Type", "application/octet-stream")
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return
+		}
+
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
 	}
 }
 
@@ -96,12 +136,48 @@ func (c counter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
+type uploadCounter struct {
+	total *atomic.Int64
+}
+
+func (u uploadCounter) Read(p []byte) (int, error) {
+	n, err := zeroReader{}.Read(p)
+	u.total.Add(int64(n))
+	return n, err
+}
+
 // get performs an HTTP GET request and returns the response body.
 func get(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	return io.ReadAll(resp.Body)
+}
+
+func uploadURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+
+	if rangeExpr.MatchString(parsed.Path) {
+		parsed.Path = rangeExpr.ReplaceAllString(parsed.Path, "/range/0-0")
+		return parsed.String(), nil
+	}
+
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/") + "/range/0-0"
+	return parsed.String(), nil
 }
