@@ -124,7 +124,7 @@ func (u *updateChecker) loadState() (updateState, error) {
 	}
 
 	var state updateState
-	if err := json.Unmarshal(body, &state); err != nil {
+	if err := json.Unmarshal(body, &state); err != nil { //nolint:nilerr // corrupted cache is treated as empty state to trigger a fresh refresh
 		return updateState{}, nil
 	}
 	return state, nil
@@ -142,7 +142,11 @@ func (u *updateChecker) saveState(state updateState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cachePath, body, 0o644)
+	tmpPath := cachePath + ".tmp"
+	if err := os.WriteFile(tmpPath, body, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, cachePath)
 }
 
 func (u *updateChecker) fetchLatestRelease(ctx context.Context) (latestRelease, error) {
@@ -170,11 +174,15 @@ func (u *updateChecker) fetchLatestRelease(ctx context.Context) (latestRelease, 
 }
 
 func (u *updateChecker) refresh(ctx context.Context, state updateState) (updateState, error) {
+	state.LastCheckedAt = u.now()
 	release, err := u.fetchLatestRelease(ctx)
 	if err != nil {
+		saveErr := u.saveState(state)
+		if saveErr != nil {
+			return state, saveErr
+		}
 		return state, err
 	}
-	state.LastCheckedAt = u.now()
 	state.LatestTag = release.TagName
 	state.LatestHTMLURL = release.HTMLURL
 	state.LatestCreatedAt = release.CreatedAt

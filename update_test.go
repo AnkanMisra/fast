@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -230,8 +231,8 @@ func TestUpdateCheckerPersistsState(t *testing.T) {
 	}
 
 	cacheFile := filepath.Join(dir, appName, updateCacheFileName)
-	if cacheFile == "" {
-		t.Fatal("cache file path should be non-empty")
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("expected cache file to exist at %s: %v", cacheFile, err)
 	}
 }
 
@@ -257,4 +258,131 @@ func TestUpdateCheckerNoticeIncludesUpgradeCommand(t *testing.T) {
 	if !strings.Contains(notice, "v0.2.0") {
 		t.Fatalf("notice = %q, want latest version", notice)
 	}
+}
+
+func TestUpdateCheckerPrepareResolveAndMarkNotified(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	now := time.Date(2026, 7, 7, 10, 0, 0, 0, time.UTC)
+	releaseCreatedAt := now.Add(-2 * time.Hour)
+	releaseReady := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-releaseReady
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name":"v0.2.0","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v0.2.0","created_at":"2026-07-07T08:00:00Z"}`))
+	}))
+	defer server.Close()
+
+	checker := newUpdateChecker(versionInfo{Kind: versionKindRelease, Version: "v0.1.0"})
+	checker.now = func() time.Time { return now }
+	checker.userCacheDir = func() (string, error) { return dir, nil }
+	checker.client = server.Client()
+	checker.latestReleaseURL = server.URL
+
+	cached, refreshed := checker.prepare()
+	if !cached.LastCheckedAt.IsZero() {
+		t.Fatalf("cached.LastCheckedAt = %v, want zero value", cached.LastCheckedAt)
+	}
+	if refreshed == nil {
+		t.Fatal("prepare should start a refresh channel")
+	}
+
+	if resolved := checker.resolveState(cached, refreshed); resolved.LatestTag != "" {
+		t.Fatalf("resolveState should return cached state before refresh completes, got tag %q", resolved.LatestTag)
+	}
+
+	close(releaseReady)
+
+	var resolved updateState
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		resolved = checker.resolveState(cached, refreshed)
+		if resolved.LatestTag != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if resolved.LatestTag != "v0.2.0" {
+		t.Fatalf("resolved.LatestTag = %q, want v0.2.0", resolved.LatestTag)
+	}
+	if resolved.LastCheckedAt != now {
+		t.Fatalf("resolved.LastCheckedAt = %v, want %v", resolved.LastCheckedAt, now)
+	}
+	if resolved.LatestCreatedAt != releaseCreatedAt {
+		t.Fatalf("resolved.LatestCreatedAt = %v, want %v", resolved.LatestCreatedAt, releaseCreatedAt)
+	}
+
+	if err := checker.markNotified(resolved); err != nil {
+		t.Fatalf("markNotified returned error: %v", err)
+	}
+
+	loaded, err := checker.loadState()
+	if err != nil {
+		t.Fatalf("loadState returned error: %v", err)
+	}
+	if loaded.LastNotifiedAt != now {
+		t.Fatalf("loaded.LastNotifiedAt = %v, want %v", loaded.LastNotifiedAt, now)
+	}
+}
+
+func TestUpdateCheckerRefreshFailureStillPersistsCheckCadence(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	now := time.Date(2026, 7, 7, 10, 0, 0, 0, time.UTC)
+	existingCreatedAt := now.Add(-48 * time.Hour)
+	checker := newUpdateChecker(versionInfo{Kind: versionKindRelease, Version: "v0.1.0"})
+	checker.now = func() time.Time { return now }
+	checker.userCacheDir = func() (string, error) { return dir, nil }
+	checker.client = &http.Client{
+		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Status:     "403 Forbidden",
+				Body:       http.NoBody,
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+	checker.latestReleaseURL = "https://api.github.com/repos/AnkanMisra/fast/releases/latest"
+
+	state := updateState{
+		LatestTag:       "v0.1.1",
+		LatestHTMLURL:   "https://github.com/AnkanMisra/fast/releases/tag/v0.1.1",
+		LatestCreatedAt: existingCreatedAt,
+	}
+
+	refreshed, err := checker.refresh(context.Background(), state)
+	if err == nil {
+		t.Fatal("refresh should return the upstream error")
+	}
+	if refreshed.LastCheckedAt != now {
+		t.Fatalf("refreshed.LastCheckedAt = %v, want %v", refreshed.LastCheckedAt, now)
+	}
+	if refreshed.LatestTag != state.LatestTag {
+		t.Fatalf("refreshed.LatestTag = %q, want %q", refreshed.LatestTag, state.LatestTag)
+	}
+	if refreshed.LatestCreatedAt != existingCreatedAt {
+		t.Fatalf("refreshed.LatestCreatedAt = %v, want %v", refreshed.LatestCreatedAt, existingCreatedAt)
+	}
+
+	loaded, loadErr := checker.loadState()
+	if loadErr != nil {
+		t.Fatalf("loadState returned error: %v", loadErr)
+	}
+	if loaded.LastCheckedAt != now {
+		t.Fatalf("loaded.LastCheckedAt = %v, want %v", loaded.LastCheckedAt, now)
+	}
+	if loaded.LatestTag != state.LatestTag {
+		t.Fatalf("loaded.LatestTag = %q, want %q", loaded.LatestTag, state.LatestTag)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }

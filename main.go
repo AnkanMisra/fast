@@ -381,16 +381,18 @@ func main() {
 	}
 	versionInfo := currentVersionInfo()
 	if config.ShowVersion {
-		fmt.Fprintln(os.Stdout, versionInfo.cliString())
+		if _, err := fmt.Fprintln(os.Stdout, versionInfo.cliString()); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 
-	var updateChecker *updateChecker
+	var checker *updateChecker
 	var cachedUpdateState updateState
 	var refreshedState <-chan updateState
-	if checker := newUpdateChecker(versionInfo); checker.enabled() {
-		updateChecker = checker
-		cachedUpdateState, refreshedState = checker.prepare()
+	if c := newUpdateChecker(versionInfo); c.enabled() {
+		checker = c
+		cachedUpdateState, refreshedState = c.prepare()
 	}
 
 	urls, err := targets(connections)
@@ -407,20 +409,20 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	model, _ := finalModel.(Model)
-	if updateChecker == nil || model.quitting {
+	model, ok := finalModel.(Model)
+	if checker == nil || (ok && model.quitting) {
 		return
 	}
 
-	cachedUpdateState = updateChecker.resolveState(cachedUpdateState, refreshedState)
-	notice, ok := updateChecker.notice(cachedUpdateState)
+	cachedUpdateState = checker.resolveState(cachedUpdateState, refreshedState)
+	notice, ok := checker.notice(cachedUpdateState)
 	if !ok {
 		return
 	}
-	if err := updateChecker.markNotified(cachedUpdateState); err != nil {
+	if _, err := fmt.Fprintln(os.Stderr, notice); err != nil {
 		return
 	}
-	fmt.Fprintln(os.Stderr, notice)
+	_ = checker.markNotified(cachedUpdateState)
 }
 
 func configFromArgs(args []string, output io.Writer) (CLIConfig, error) {
