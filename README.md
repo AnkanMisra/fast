@@ -20,15 +20,33 @@ To run a full-duplex stress test instead, measure both directions at once:
 fast --simultaneous
 ```
 
+To print the installed version:
+
+```bash
+fast --version
+```
+
 ### Installation
 
 Install with Go:
 
 ```sh
-go install github.com/AnkanMisra/fast@main
+go install github.com/AnkanMisra/fast@latest
 ```
 
 Or download a binary from the [releases](https://github.com/AnkanMisra/fast/releases).
+
+### Update Notifications
+
+`fast` checks GitHub Releases at most once every 24 hours during interactive
+runs and lets you know when a newer version is available.
+
+Set `FAST_NO_UPDATE_NOTIFIER=1` to disable update checks and notices.
+
+### Releasing
+
+Create a semver tag like `v0.1.0` and push it to GitHub to publish fresh
+binaries and checksums through the release workflow.
 
 ## License
 

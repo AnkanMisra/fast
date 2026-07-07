@@ -340,7 +340,7 @@ func TestConfigFromArgsEnablesSimultaneousMode(t *testing.T) {
 		t.Fatalf("configFromArgs returned error: %v", err)
 	}
 
-	if !config.Simultaneous {
+	if !config.Model.Simultaneous {
 		t.Fatal("Simultaneous = false, want true")
 	}
 }
@@ -353,7 +353,7 @@ func TestConfigFromArgsDefaultsToSequentialMode(t *testing.T) {
 		t.Fatalf("configFromArgs returned error: %v", err)
 	}
 
-	if config.Simultaneous {
+	if config.Model.Simultaneous {
 		t.Fatal("Simultaneous = true, want false")
 	}
 }
@@ -369,6 +369,22 @@ func TestConfigFromArgsShowsHelp(t *testing.T) {
 
 	if !strings.Contains(output.String(), "-simultaneous") {
 		t.Fatalf("help output = %q, want simultaneous option", output.String())
+	}
+	if !strings.Contains(output.String(), "-version") {
+		t.Fatalf("help output = %q, want version option", output.String())
+	}
+}
+
+func TestConfigFromArgsEnablesVersionMode(t *testing.T) {
+	t.Parallel()
+
+	config, err := configFromArgs([]string{"--version"}, io.Discard)
+	if err != nil {
+		t.Fatalf("configFromArgs returned error: %v", err)
+	}
+
+	if !config.ShowVersion {
+		t.Fatal("ShowVersion = false, want true")
 	}
 }
 

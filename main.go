@@ -68,6 +68,11 @@ type ModelConfig struct {
 	Simultaneous  bool
 }
 
+type CLIConfig struct {
+	Model       ModelConfig
+	ShowVersion bool
+}
+
 type PhaseStats struct {
 	bytes  *atomic.Int64
 	start  time.Time
@@ -374,6 +379,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	versionInfo := currentVersionInfo()
+	if config.ShowVersion {
+		fmt.Fprintln(os.Stdout, versionInfo.cliString())
+		return
+	}
+
+	var updateChecker *updateChecker
+	var cachedUpdateState updateState
+	var refreshedState <-chan updateState
+	if checker := newUpdateChecker(versionInfo); checker.enabled() {
+		updateChecker = checker
+		cachedUpdateState, refreshedState = checker.prepare()
+	}
 
 	urls, err := targets(connections)
 	if err != nil {
@@ -385,17 +403,36 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if _, err := tea.NewProgram(NewModel(urls, config)).Run(); err != nil {
+	finalModel, err := tea.NewProgram(NewModel(urls, config.Model)).Run()
+	if err != nil {
 		log.Fatal(err)
 	}
+	model, _ := finalModel.(Model)
+	if updateChecker == nil || model.quitting {
+		return
+	}
+
+	cachedUpdateState = updateChecker.resolveState(cachedUpdateState, refreshedState)
+	notice, ok := updateChecker.notice(cachedUpdateState)
+	if !ok {
+		return
+	}
+	if err := updateChecker.markNotified(cachedUpdateState); err != nil {
+		return
+	}
+	fmt.Fprintln(os.Stderr, notice)
 }
 
-func configFromArgs(args []string, output io.Writer) (ModelConfig, error) {
+func configFromArgs(args []string, output io.Writer) (CLIConfig, error) {
 	flags := flag.NewFlagSet("fast", flag.ContinueOnError)
 	flags.SetOutput(output)
 	simultaneous := flags.Bool("simultaneous", false, "measure download and upload at the same time")
+	showVersion := flags.Bool("version", false, "print version information")
 	if err := flags.Parse(args); err != nil {
-		return ModelConfig{}, err
+		return CLIConfig{}, err
 	}
-	return ModelConfig{Simultaneous: *simultaneous}, nil
+	return CLIConfig{
+		Model:       ModelConfig{Simultaneous: *simultaneous},
+		ShowVersion: *showVersion,
+	}, nil
 }
