@@ -17,7 +17,8 @@ import (
 // JavaScript bundle. It rarely changes, so this is usually good enough.
 const fallbackToken = "YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm"
 
-const uploadPayloadBytes = 1 * 1024 * 1024
+const uploadPayloadBytes = 512 * 1024
+const uploadConnections = 10
 
 const requestTimeout = 15 * time.Second
 
@@ -106,7 +107,7 @@ func upload(ctx context.Context, rawURL string, total *atomic.Int64) {
 			ctx,
 			http.MethodPost,
 			uploadURL,
-			io.NopCloser(io.LimitReader(uploadCounter{total: total}, uploadPayloadBytes)),
+			io.NopCloser(io.LimitReader(zeroReader{}, uploadPayloadBytes)),
 		)
 		if err != nil {
 			return
@@ -122,6 +123,9 @@ func upload(ctx context.Context, rawURL string, total *atomic.Int64) {
 
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			total.Add(uploadPayloadBytes)
+		}
 	}
 }
 
@@ -143,16 +147,6 @@ func (zeroReader) Read(p []byte) (int, error) {
 		p[i] = 0
 	}
 	return len(p), nil
-}
-
-type uploadCounter struct {
-	total *atomic.Int64
-}
-
-func (u uploadCounter) Read(p []byte) (int, error) {
-	n, err := zeroReader{}.Read(p)
-	u.total.Add(int64(n))
-	return n, err
 }
 
 // get performs an HTTP GET request and returns the response body.

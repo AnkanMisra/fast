@@ -116,16 +116,17 @@ func TestModelCompletesAfterSequentialUpload(t *testing.T) {
 	}
 
 	runCommandAsync(cmd)
+	wantUploadBytes := int64(uploadConnections) * 250_000
 	waitUntil(t, func() bool {
-		return model.upload.bytes.Load() == 250_000
+		return model.upload.bytes.Load() == wantUploadBytes
 	})
 
 	now = now.Add(time.Second)
 	updated, cmd = model.Update(tickMsg(now))
 	model = updated.(Model)
 
-	if model.upload.bytes.Load() != 250_000 {
-		t.Fatalf("upload bytes = %d, want 250000", model.upload.bytes.Load())
+	if model.upload.bytes.Load() != wantUploadBytes {
+		t.Fatalf("upload bytes = %d, want %d", model.upload.bytes.Load(), wantUploadBytes)
 	}
 
 	if !model.done {
@@ -247,8 +248,9 @@ func TestModelCompletesSimultaneousModeAfterSharedWindow(t *testing.T) {
 	})
 
 	runCommandAsync(model.Init())
+	wantUploadBytes := int64(uploadConnections) * 250_000
 	waitUntil(t, func() bool {
-		return model.download.bytes.Load() == 125_000 && model.upload.bytes.Load() == 250_000
+		return model.download.bytes.Load() == 125_000 && model.upload.bytes.Load() == wantUploadBytes
 	})
 
 	now = now.Add(time.Second)

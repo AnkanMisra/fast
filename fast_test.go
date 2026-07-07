@@ -46,7 +46,7 @@ func TestUploadPayloadCanCompleteOnSlowLinks(t *testing.T) {
 	t.Parallel()
 
 	requiredMbps := mbps(uploadPayloadBytes, duration)
-	if requiredMbps >= 21 {
+	if requiredMbps >= 1 {
 		t.Fatalf("upload payload requires %.1f Mbps to complete inside %s", requiredMbps, duration)
 	}
 }
@@ -107,11 +107,8 @@ func TestUploadPostsOctetStreamAndCountsBytes(t *testing.T) {
 		t.Fatal("server saw zero uploaded bytes")
 	}
 
-	if total.Load() == 0 {
-		t.Fatal("upload counter did not record bytes before the server completed the request")
-	}
-	if total.Load() != uploaded.Load() {
-		t.Fatalf("upload counter recorded %d bytes, server saw %d", total.Load(), uploaded.Load())
+	if total.Load() != 0 {
+		t.Fatalf("upload counter recorded %d bytes before the server completed the request", total.Load())
 	}
 
 	responseAllowed.Store(true)
@@ -154,6 +151,79 @@ func TestUploadUsesAllTargets(t *testing.T) {
 		if target != model.targets[i] {
 			t.Fatalf("upload target %d = %q, want %q", i, target, model.targets[i])
 		}
+	}
+}
+
+func TestUploadUsesEnoughWorkersToAvoidRTTCap(t *testing.T) {
+	t.Parallel()
+
+	model := NewModel([]string{
+		"https://oca1.example.com/speedtest?token=test",
+		"https://oca2.example.com/speedtest?token=test",
+		"https://oca3.example.com/speedtest?token=test",
+	})
+
+	work := model.measurementWork(uploadPhase)
+	if len(work) != uploadConnections {
+		t.Fatalf("upload work items = %d, want %d", len(work), uploadConnections)
+	}
+	for i, target := range work {
+		want := model.targets[i%len(model.targets)]
+		if target != want {
+			t.Fatalf("upload worker %d target = %q, want %q", i, target, want)
+		}
+	}
+}
+
+func TestUploadDoesNotCountFailedRequests(t *testing.T) {
+	var uploaded atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return
+		}
+		uploaded.Add(int64(len(body)))
+
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("server response writer does not support hijacking")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack failed: %v", err)
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+
+	client := httpClient
+	httpClient = server.Client()
+	defer func() {
+		httpClient = client
+	}()
+
+	var total atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		upload(ctx, server.URL+"/speedtest?token=test", &total)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for uploaded.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	<-done
+
+	if uploaded.Load() == 0 {
+		t.Fatal("server never received an upload body")
+	}
+	if total.Load() != 0 {
+		t.Fatalf("upload counter recorded %d bytes for a failed request", total.Load())
 	}
 }
 

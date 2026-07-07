@@ -293,12 +293,12 @@ func (m *Model) startMeasurement(phase Phase) tea.Cmd {
 		probe = m.config.UploadProbe
 		bytes = m.upload.bytes
 	}
-	targets := m.measurementTargets(phase)
+	work := m.measurementWork(phase)
 	ctx := m.ctx
 
 	return func() tea.Msg {
 		var wg sync.WaitGroup
-		for _, url := range targets {
+		for _, url := range work {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -312,6 +312,19 @@ func (m *Model) startMeasurement(phase Phase) tea.Cmd {
 
 func (m Model) measurementTargets(phase Phase) []string {
 	return append([]string(nil), m.targets...)
+}
+
+func (m Model) measurementWork(phase Phase) []string {
+	targets := m.measurementTargets(phase)
+	if phase != uploadPhase || len(targets) == 0 || len(targets) >= uploadConnections {
+		return targets
+	}
+
+	work := make([]string, uploadConnections)
+	for i := range work {
+		work[i] = targets[i%len(targets)]
+	}
+	return work
 }
 
 func (m Model) renderStats(stats PhaseStats) string {
