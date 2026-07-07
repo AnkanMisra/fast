@@ -179,17 +179,24 @@ func TestUpdateCheckerFetchLatestRelease(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/releases/latest" {
-			t.Fatalf("path = %q, want /releases/latest", r.URL.Path)
+		if r.URL.Path != "/releases" {
+			t.Fatalf("path = %q, want /releases", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("per_page"); got != "100" {
+			t.Fatalf("per_page = %q, want 100", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"tag_name":"v0.2.0","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v0.2.0","created_at":"2026-07-07T08:00:00Z"}`))
+		_, _ = w.Write([]byte(`[
+			{"tag_name":"v0.1.5","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v0.1.5","created_at":"2026-07-07T09:00:00Z"},
+			{"tag_name":"v0.2.0","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v0.2.0","created_at":"2026-07-07T08:00:00Z"},
+			{"tag_name":"not-a-version","html_url":"https://github.com/AnkanMisra/fast/releases/tag/not-a-version","created_at":"2026-07-07T10:00:00Z"}
+		]`))
 	}))
 	defer server.Close()
 
 	checker := newUpdateChecker(versionInfo{Kind: versionKindRelease, Version: "v0.1.0"})
 	checker.client = server.Client()
-	checker.latestReleaseURL = server.URL + "/releases/latest"
+	checker.releasesURL = server.URL + "/releases?per_page=100"
 
 	release, err := checker.fetchLatestRelease(context.Background())
 	if err != nil {
@@ -271,7 +278,7 @@ func TestUpdateCheckerPrepareResolveAndMarkNotified(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-releaseReady
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"tag_name":"v0.2.0","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v0.2.0","created_at":"2026-07-07T08:00:00Z"}`))
+		_, _ = w.Write([]byte(`[{"tag_name":"v0.2.0","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v0.2.0","created_at":"2026-07-07T08:00:00Z"}]`))
 	}))
 	defer server.Close()
 
@@ -279,7 +286,7 @@ func TestUpdateCheckerPrepareResolveAndMarkNotified(t *testing.T) {
 	checker.now = func() time.Time { return now }
 	checker.userCacheDir = func() (string, error) { return dir, nil }
 	checker.client = server.Client()
-	checker.latestReleaseURL = server.URL
+	checker.releasesURL = server.URL
 
 	cached, refreshed := checker.prepare()
 	if !cached.LastCheckedAt.IsZero() {
@@ -296,13 +303,17 @@ func TestUpdateCheckerPrepareResolveAndMarkNotified(t *testing.T) {
 	close(releaseReady)
 
 	var resolved updateState
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		resolved = checker.resolveState(cached, refreshed)
-		if resolved.LatestTag != "" {
-			break
+	select {
+	case updated, ok := <-refreshed:
+		if !ok {
+			t.Fatal("refresh channel closed before delivering updated state")
 		}
-		time.Sleep(10 * time.Millisecond)
+		resolvedCh := make(chan updateState, 1)
+		resolvedCh <- updated
+		close(resolvedCh)
+		resolved = checker.resolveState(cached, resolvedCh)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for refreshed state")
 	}
 
 	if resolved.LatestTag != "v0.2.0" {
@@ -347,7 +358,7 @@ func TestUpdateCheckerRefreshFailureStillPersistsCheckCadence(t *testing.T) {
 			}, nil
 		}),
 	}
-	checker.latestReleaseURL = "https://api.github.com/repos/AnkanMisra/fast/releases/latest"
+	checker.releasesURL = "https://api.github.com/repos/AnkanMisra/fast/releases?per_page=100"
 
 	state := updateState{
 		LatestTag:       "v0.1.1",
@@ -378,6 +389,73 @@ func TestUpdateCheckerRefreshFailureStillPersistsCheckCadence(t *testing.T) {
 	}
 	if loaded.LatestTag != state.LatestTag {
 		t.Fatalf("loaded.LatestTag = %q, want %q", loaded.LatestTag, state.LatestTag)
+	}
+}
+
+func TestUpdateCheckerPreparePreservesFailedRefreshState(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	now := time.Date(2026, 7, 7, 10, 0, 0, 0, time.UTC)
+	checker := newUpdateChecker(versionInfo{Kind: versionKindRelease, Version: "v0.1.0"})
+	checker.now = func() time.Time { return now }
+	checker.userCacheDir = func() (string, error) { return dir, nil }
+	checker.client = &http.Client{
+		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Status:     "403 Forbidden",
+				Body:       http.NoBody,
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+	checker.releasesURL = "https://api.github.com/repos/AnkanMisra/fast/releases?per_page=100"
+
+	initial := updateState{
+		LatestTag:       "v0.2.0",
+		LatestHTMLURL:   "https://github.com/AnkanMisra/fast/releases/tag/v0.2.0",
+		LatestCreatedAt: now.Add(-2 * time.Hour),
+	}
+	if err := checker.saveState(initial); err != nil {
+		t.Fatalf("saveState returned error: %v", err)
+	}
+
+	cached, refreshed := checker.prepare()
+	if refreshed == nil {
+		t.Fatal("prepare should return a refresh channel for stale state")
+	}
+
+	var resolved updateState
+	select {
+	case updated, ok := <-refreshed:
+		if !ok {
+			t.Fatal("refresh channel closed before delivering failure state")
+		}
+		resolvedCh := make(chan updateState, 1)
+		resolvedCh <- updated
+		close(resolvedCh)
+		resolved = checker.resolveState(cached, resolvedCh)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for failure state")
+	}
+
+	if resolved.LastCheckedAt != now {
+		t.Fatalf("resolved.LastCheckedAt = %v, want %v", resolved.LastCheckedAt, now)
+	}
+	if err := checker.markNotified(resolved); err != nil {
+		t.Fatalf("markNotified returned error: %v", err)
+	}
+
+	loaded, err := checker.loadState()
+	if err != nil {
+		t.Fatalf("loadState returned error: %v", err)
+	}
+	if loaded.LastCheckedAt != now {
+		t.Fatalf("loaded.LastCheckedAt = %v, want %v", loaded.LastCheckedAt, now)
+	}
+	if loaded.LastNotifiedAt != now {
+		t.Fatalf("loaded.LastNotifiedAt = %v, want %v", loaded.LastNotifiedAt, now)
 	}
 }
 

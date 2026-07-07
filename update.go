@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"golang.org/x/mod/semver"
 	"golang.org/x/term"
 )
 
@@ -23,6 +25,14 @@ type latestRelease struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type githubRelease struct {
+	TagName    string    `json:"tag_name"`
+	HTMLURL    string    `json:"html_url"`
+	CreatedAt  time.Time `json:"created_at"`
+	Draft      bool      `json:"draft"`
+	Prerelease bool      `json:"prerelease"`
+}
+
 type updateState struct {
 	LastCheckedAt   time.Time `json:"last_checked_at,omitempty"`
 	LastNotifiedAt  time.Time `json:"last_notified_at,omitempty"`
@@ -32,13 +42,13 @@ type updateState struct {
 }
 
 type updateChecker struct {
-	version          versionInfo
-	client           *http.Client
-	now              func() time.Time
-	getenv           func(string) string
-	interactive      func() bool
-	userCacheDir     func() (string, error)
-	latestReleaseURL string
+	version      versionInfo
+	client       *http.Client
+	now          func() time.Time
+	getenv       func(string) string
+	interactive  func() bool
+	userCacheDir func() (string, error)
+	releasesURL  string
 }
 
 func newUpdateChecker(version versionInfo) *updateChecker {
@@ -47,11 +57,11 @@ func newUpdateChecker(version versionInfo) *updateChecker {
 		client: &http.Client{
 			Timeout: 3 * time.Second,
 		},
-		now:              time.Now,
-		getenv:           os.Getenv,
-		interactive:      isInteractiveSession,
-		userCacheDir:     os.UserCacheDir,
-		latestReleaseURL: "https://api.github.com/repos/AnkanMisra/fast/releases/latest",
+		now:          time.Now,
+		getenv:       os.Getenv,
+		interactive:  isInteractiveSession,
+		userCacheDir: os.UserCacheDir,
+		releasesURL:  "https://api.github.com/repos/AnkanMisra/fast/releases?per_page=100",
 	}
 }
 
@@ -150,27 +160,53 @@ func (u *updateChecker) saveState(state updateState) error {
 }
 
 func (u *updateChecker) fetchLatestRelease(ctx context.Context) (latestRelease, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.latestReleaseURL, nil)
-	if err != nil {
-		return latestRelease{}, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	nextURL := u.releasesURL
+	var best latestRelease
+	found := false
 
-	resp, err := u.client.Do(req)
-	if err != nil {
-		return latestRelease{}, err
-	}
-	defer func() { _ = resp.Body.Close() }()
+	for nextURL != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
+		if err != nil {
+			return latestRelease{}, err
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
 
-	if resp.StatusCode != http.StatusOK {
-		return latestRelease{}, fmt.Errorf("latest release request failed: %s", resp.Status)
+		resp, err := u.client.Do(req)
+		if err != nil {
+			return latestRelease{}, err
+		}
+
+		var releases []githubRelease
+		decodeErr := json.NewDecoder(resp.Body).Decode(&releases)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return latestRelease{}, fmt.Errorf("release list request failed: %s", resp.Status)
+		}
+		if decodeErr != nil {
+			return latestRelease{}, decodeErr
+		}
+
+		for _, release := range releases {
+			if release.Draft || release.Prerelease || !semver.IsValid(release.TagName) {
+				continue
+			}
+			if !found || semver.Compare(release.TagName, best.TagName) > 0 {
+				best = latestRelease{
+					TagName:   release.TagName,
+					HTMLURL:   release.HTMLURL,
+					CreatedAt: release.CreatedAt,
+				}
+				found = true
+			}
+		}
+
+		nextURL = nextPageURL(resp.Header.Get("Link"))
 	}
 
-	var release latestRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return latestRelease{}, err
+	if !found {
+		return latestRelease{}, fmt.Errorf("no published semver release found")
 	}
-	return release, nil
+	return best, nil
 }
 
 func (u *updateChecker) refresh(ctx context.Context, state updateState) (updateState, error) {
@@ -201,10 +237,10 @@ func (u *updateChecker) prepare() (updateState, <-chan updateState) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		refreshed, err := u.refresh(ctx, state)
+		ch <- refreshed
 		if err != nil {
 			return
 		}
-		ch <- refreshed
 	}()
 	return state, ch
 }
@@ -226,4 +262,20 @@ func (u *updateChecker) resolveState(state updateState, refreshed <-chan updateS
 func (u *updateChecker) markNotified(state updateState) error {
 	state.LastNotifiedAt = u.now()
 	return u.saveState(state)
+}
+
+func nextPageURL(linkHeader string) string {
+	for _, part := range strings.Split(linkHeader, ",") {
+		part = strings.TrimSpace(part)
+		if !strings.HasSuffix(part, `rel="next"`) {
+			continue
+		}
+		start := strings.Index(part, "<")
+		end := strings.Index(part, ">")
+		if start == -1 || end == -1 || end <= start+1 {
+			return ""
+		}
+		return part[start+1 : end]
+	}
+	return ""
 }
