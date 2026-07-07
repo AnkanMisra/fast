@@ -29,5 +29,5 @@ Type "fast"
 Sleep 750ms
 Enter
 
-# Let the 10s speed test run and settle on its final reading
-Sleep 10s
+# Let the sequential download and upload tests run and settle
+Sleep 20s
