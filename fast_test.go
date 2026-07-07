@@ -45,9 +45,9 @@ func TestUploadURLReplacesExistingRange(t *testing.T) {
 func TestUploadPayloadCanCompleteOnSlowLinks(t *testing.T) {
 	t.Parallel()
 
-	requiredMbps := mbps(uploadPayloadBytes, duration)
+	requiredMbps := mbps(int64(uploadConnections)*uploadPayloadBytes, duration)
 	if requiredMbps >= 1 {
-		t.Fatalf("upload payload requires %.1f Mbps to complete inside %s", requiredMbps, duration)
+		t.Fatalf("upload workload requires %.1f Mbps to complete inside %s", requiredMbps, duration)
 	}
 }
 

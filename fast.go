@@ -17,7 +17,7 @@ import (
 // JavaScript bundle. It rarely changes, so this is usually good enough.
 const fallbackToken = "YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm"
 
-const uploadPayloadBytes = 512 * 1024
+const uploadPayloadBytes = 100 * 1024
 const uploadConnections = 10
 
 const requestTimeout = 15 * time.Second
