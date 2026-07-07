@@ -17,8 +17,9 @@ import (
 // JavaScript bundle. It rarely changes, so this is usually good enough.
 const fallbackToken = "YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm"
 
-const uploadPayloadBytes = 100 * 1024
 const uploadConnections = 10
+const initialUploadPayloadBytes = 64 * 1024
+const maxUploadPayloadBytes = 1024 * 1024
 
 const requestTimeout = 15 * time.Second
 
@@ -102,18 +103,19 @@ func upload(ctx context.Context, rawURL string, total *atomic.Int64) {
 		return
 	}
 
+	payloadBytes := int64(initialUploadPayloadBytes)
 	for ctx.Err() == nil {
 		req, err := http.NewRequestWithContext(
 			ctx,
 			http.MethodPost,
 			uploadURL,
-			io.NopCloser(io.LimitReader(zeroReader{}, uploadPayloadBytes)),
+			io.NopCloser(io.LimitReader(zeroReader{}, payloadBytes)),
 		)
 		if err != nil {
 			return
 		}
 
-		req.ContentLength = uploadPayloadBytes
+		req.ContentLength = payloadBytes
 		req.Header.Set("Content-Type", "application/octet-stream")
 
 		resp, err := httpClient.Do(req)
@@ -124,7 +126,13 @@ func upload(ctx context.Context, rawURL string, total *atomic.Int64) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-			total.Add(uploadPayloadBytes)
+			total.Add(payloadBytes)
+			if payloadBytes < maxUploadPayloadBytes {
+				payloadBytes *= 2
+				if payloadBytes > maxUploadPayloadBytes {
+					payloadBytes = maxUploadPayloadBytes
+				}
+			}
 		}
 	}
 }

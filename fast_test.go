@@ -45,7 +45,7 @@ func TestUploadURLReplacesExistingRange(t *testing.T) {
 func TestUploadPayloadCanCompleteOnSlowLinks(t *testing.T) {
 	t.Parallel()
 
-	requiredMbps := mbps(int64(uploadConnections)*uploadPayloadBytes, duration)
+	requiredMbps := mbps(int64(uploadConnections)*initialUploadPayloadBytes, duration)
 	if requiredMbps >= 1 {
 		t.Fatalf("upload workload requires %.1f Mbps to complete inside %s", requiredMbps, duration)
 	}
@@ -58,7 +58,7 @@ func TestUploadPostsOctetStreamAndCountsBytes(t *testing.T) {
 	responseAllowed := atomic.Bool{}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
+		requestNumber := requests.Add(1)
 
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %q, want %q", r.Method, http.MethodPost)
@@ -74,7 +74,12 @@ func TestUploadPostsOctetStreamAndCountsBytes(t *testing.T) {
 		}
 
 		uploaded.Add(int64(len(body)))
-		<-allowResponse
+		if requestNumber == 1 {
+			<-allowResponse
+		} else {
+			<-r.Context().Done()
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -126,11 +131,8 @@ func TestUploadPostsOctetStreamAndCountsBytes(t *testing.T) {
 		t.Fatal("test did not allow the server response")
 	}
 
-	if total.Load() < uploadPayloadBytes {
-		t.Fatalf("upload counter recorded %d bytes, want at least %d", total.Load(), uploadPayloadBytes)
-	}
-	if total.Load()%uploadPayloadBytes != 0 {
-		t.Fatalf("upload counter recorded %d bytes, want whole payload chunks", total.Load())
+	if total.Load() != initialUploadPayloadBytes {
+		t.Fatalf("upload counter recorded %d bytes, want %d", total.Load(), initialUploadPayloadBytes)
 	}
 }
 
@@ -171,6 +173,73 @@ func TestUploadUsesEnoughWorkersToAvoidRTTCap(t *testing.T) {
 		want := model.targets[i%len(model.targets)]
 		if target != want {
 			t.Fatalf("upload worker %d target = %q, want %q", i, target, want)
+		}
+	}
+
+	maxMbpsAt100ms := mbps(int64(uploadConnections)*maxUploadPayloadBytes, 100*time.Millisecond)
+	if maxMbpsAt100ms < 500 {
+		t.Fatalf("upload workload caps at %.1f Mbps with 100ms RTT, want at least 500 Mbps", maxMbpsAt100ms)
+	}
+}
+
+func TestUploadPayloadGrowsAfterSuccessfulRequests(t *testing.T) {
+	var payloadsMu atomic.Int32
+	payloads := make(chan int64, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("ReadAll failed: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		if payloadsMu.Add(1) <= 4 {
+			payloads <- int64(len(body))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := httpClient
+	httpClient = server.Client()
+	defer func() {
+		httpClient = client
+	}()
+
+	var total atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		upload(ctx, server.URL+"/speedtest?token=test", &total)
+	}()
+
+	var got []int64
+	deadline := time.After(2 * time.Second)
+	for len(got) < 4 {
+		select {
+		case size := <-payloads:
+			got = append(got, size)
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatalf("saw payload sizes %v, want 4 requests", got)
+		}
+	}
+
+	cancel()
+	<-done
+
+	want := []int64{
+		initialUploadPayloadBytes,
+		initialUploadPayloadBytes * 2,
+		initialUploadPayloadBytes * 4,
+		initialUploadPayloadBytes * 8,
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("payload %d = %d, want %d (all payloads: %v)", i, got[i], want[i], got)
 		}
 	}
 }
