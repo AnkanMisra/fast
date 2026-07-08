@@ -11,8 +11,8 @@ fast
 ```
 
 `fast` measures your download speed first and upload speed second against the
-nearest Netflix Open Connect servers, reporting both in megabits per second
-right inline in your terminal.
+nearest Netflix Open Connect servers, then shows the final ping to that server,
+all inline in your terminal.
 
 To run a full-duplex stress test instead, measure both directions at once:
 

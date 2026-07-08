@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,10 @@ const maxUploadPayloadBytes = 1024 * 1024
 const requestTimeout = 15 * time.Second
 
 var httpClient = &http.Client{Timeout: requestTimeout}
+
+// latencySamples is how many timed round trips we average to estimate ping,
+// after one warm-up request that we discard.
+const latencySamples = 5
 
 var (
 	scriptExpr = regexp.MustCompile(`app-[a-z0-9]+\.js`)
@@ -75,6 +80,51 @@ func targets(count int) ([]string, error) {
 		urls[i] = target.URL
 	}
 	return urls, nil
+}
+
+// latency estimates the round-trip time to url by requesting a single byte
+// repeatedly and returning the median successful sample.
+func latency(ctx context.Context, url string) (time.Duration, error) {
+	probe := func() (time.Duration, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return 0, err
+		}
+		req.Header.Set("Range", "bytes=0-0")
+
+		start := time.Now()
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+
+		if resp.StatusCode != http.StatusPartialContent {
+			return 0, fmt.Errorf("unexpected status %s", resp.Status)
+		}
+
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return time.Since(start), nil
+	}
+
+	if _, err := probe(); err != nil {
+		return 0, err
+	}
+
+	samples := make([]time.Duration, 0, latencySamples)
+	for i := 0; i < latencySamples; i++ {
+		if d, err := probe(); err == nil {
+			samples = append(samples, d)
+		}
+	}
+	if len(samples) == 0 {
+		return 0, fmt.Errorf("latency: no successful samples")
+	}
+
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	return samples[len(samples)/2], nil
 }
 
 // download repeatedly downloads from url until the context is cancelled, adding
