@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive: tar.gz
+          - goos: linux
+            goarch: amd64
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Validate release tag
+        run: |
+          if ! printf '%s\n' "${GITHUB_REF_NAME}" | grep -Eq '^v(0|1)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "release tag must match installable v0/v1 semver without leading zeroes" >&2
+            exit 1
+          fi
+
+      - name: Build release asset
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist build
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          binary="fast"
+          if [ "$GOOS" = "windows" ]; then
+            binary="fast.exe"
+          fi
+
+          go build \
+            -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${build_date}" \
+            -o "build/${binary}" \
+            .
+
+          package="fast_${VERSION#v}_${GOOS}_${GOARCH}"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (
+              cd build
+              zip -9 "../dist/${package}.zip" "${binary}"
+            )
+          else
+            tar -C build -czf "dist/${package}.tar.gz" "${binary}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+
+      - name: Flatten artifacts and create checksums
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find dist -maxdepth 2 -type f -exec mv {} release/ \;
+          cd release
+          sha256sum * > checksums.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
