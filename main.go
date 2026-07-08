@@ -68,6 +68,11 @@ type ModelConfig struct {
 	Simultaneous  bool
 }
 
+type CLIConfig struct {
+	Model       ModelConfig
+	ShowVersion bool
+}
+
 type PhaseStats struct {
 	bytes  *atomic.Int64
 	start  time.Time
@@ -374,6 +379,21 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	versionInfo := currentVersionInfo()
+	if config.ShowVersion {
+		if _, err := fmt.Fprintln(os.Stdout, versionInfo.cliString()); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	var checker *updateChecker
+	var cachedUpdateState updateState
+	var refreshedState <-chan updateState
+	if c := newUpdateChecker(versionInfo); c.enabled() {
+		checker = c
+		cachedUpdateState, refreshedState = c.prepare()
+	}
 
 	urls, err := targets(connections)
 	if err != nil {
@@ -385,17 +405,36 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if _, err := tea.NewProgram(NewModel(urls, config)).Run(); err != nil {
+	finalModel, err := tea.NewProgram(NewModel(urls, config.Model)).Run()
+	if err != nil {
 		log.Fatal(err)
 	}
+	model, ok := finalModel.(Model)
+	if checker == nil || (ok && model.quitting) {
+		return
+	}
+
+	cachedUpdateState = checker.resolveState(cachedUpdateState, refreshedState)
+	notice, ok := checker.notice(cachedUpdateState)
+	if !ok {
+		return
+	}
+	if _, err := fmt.Fprintln(os.Stderr, notice); err != nil {
+		return
+	}
+	_ = checker.markNotified(cachedUpdateState)
 }
 
-func configFromArgs(args []string, output io.Writer) (ModelConfig, error) {
+func configFromArgs(args []string, output io.Writer) (CLIConfig, error) {
 	flags := flag.NewFlagSet("fast", flag.ContinueOnError)
 	flags.SetOutput(output)
 	simultaneous := flags.Bool("simultaneous", false, "measure download and upload at the same time")
+	showVersion := flags.Bool("version", false, "print version information")
 	if err := flags.Parse(args); err != nil {
-		return ModelConfig{}, err
+		return CLIConfig{}, err
 	}
-	return ModelConfig{Simultaneous: *simultaneous}, nil
+	return CLIConfig{
+		Model:       ModelConfig{Simultaneous: *simultaneous},
+		ShowVersion: *showVersion,
+	}, nil
 }
