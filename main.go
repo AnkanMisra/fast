@@ -28,6 +28,10 @@ const (
 
 	// sparkWidth is the width, in cells, of the speed sparkline.
 	sparkWidth = 20
+
+	// latencyTimeout bounds the final ping probe so a stalled request does not
+	// hang the CLI after the speed test has finished.
+	latencyTimeout = 5 * time.Second
 )
 
 const accentColor = "#2EF8BB"
@@ -65,6 +69,7 @@ type ModelConfig struct {
 	Now           func() time.Time
 	DownloadProbe ProbeFunc
 	UploadProbe   ProbeFunc
+	PingProbe     func(context.Context, string) (time.Duration, error)
 	Simultaneous  bool
 }
 
@@ -91,6 +96,8 @@ type Model struct {
 
 	download PhaseStats
 	upload   PhaseStats
+
+	ping time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -137,6 +144,7 @@ func defaultModelConfig() ModelConfig {
 		Now:           time.Now,
 		DownloadProbe: download,
 		UploadProbe:   upload,
+		PingProbe:     latency,
 	}
 }
 
@@ -156,10 +164,18 @@ func mergeModelConfig(base, override ModelConfig) ModelConfig {
 	if override.UploadProbe != nil {
 		base.UploadProbe = override.UploadProbe
 	}
+	if override.PingProbe != nil {
+		base.PingProbe = override.PingProbe
+	}
 	if override.Simultaneous {
 		base.Simultaneous = true
 	}
 	return base
+}
+
+type pingMsg struct {
+	duration time.Duration
+	err      error
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -171,6 +187,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stopPhase()
 			return m, tea.Quit
 		}
+
+	case pingMsg:
+		if msg.err == nil {
+			m.ping = msg.duration
+		}
+		m.done = true
+		return m, tea.Quit
 
 	case tickMsg:
 		if m.done {
@@ -191,8 +214,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				)
 			}
 
-			m.done = true
-			return m, tea.Quit
+			return m, m.measurePing()
 		}
 
 		return m, tea.Tick(m.config.TickInterval, tickCmd)
@@ -212,6 +234,9 @@ func (m Model) View() string {
 	s.WriteString("\n\n")
 	s.WriteString("upload   ")
 	s.WriteString(m.renderStats(m.upload))
+	if m.done && m.ping > 0 {
+		s.WriteString(peakStyle.Render(fmt.Sprintf("  ping %dms", m.ping.Milliseconds())))
+	}
 
 	style := baseStyle
 	if m.done {
@@ -312,6 +337,20 @@ func (m *Model) startMeasurement(phase Phase) tea.Cmd {
 		}
 		wg.Wait()
 		return nil
+	}
+}
+
+func (m Model) measurePing() tea.Cmd {
+	return func() tea.Msg {
+		if len(m.targets) == 0 || m.config.PingProbe == nil {
+			return pingMsg{err: errors.New("no ping target")}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), latencyTimeout)
+		defer cancel()
+
+		d, err := m.config.PingProbe(ctx, m.targets[0])
+		return pingMsg{duration: d, err: err}
 	}
 }
 

@@ -41,6 +41,9 @@ func TestModelDefaultsToSequentialDownloadThenUpload(t *testing.T) {
 		},
 		DownloadProbe: recordProbe(downloadPhase),
 		UploadProbe:   recordProbe(uploadPhase),
+		PingProbe: func(ctx context.Context, url string) (time.Duration, error) {
+			return 12 * time.Millisecond, nil
+		},
 	})
 
 	runCommandAsync(model.Init())
@@ -92,6 +95,9 @@ func TestModelCompletesAfterSequentialUpload(t *testing.T) {
 			total.Add(250_000)
 			<-ctx.Done()
 		},
+		PingProbe: func(ctx context.Context, url string) (time.Duration, error) {
+			return 14 * time.Millisecond, nil
+		},
 	})
 
 	runCommandAsync(model.Init())
@@ -129,12 +135,29 @@ func TestModelCompletesAfterSequentialUpload(t *testing.T) {
 		t.Fatalf("upload bytes = %d, want %d", model.upload.bytes.Load(), wantUploadBytes)
 	}
 
-	if !model.done {
-		t.Fatal("model should be done after upload measurement window")
+	if model.done {
+		t.Fatal("model should wait for ping before finishing")
 	}
 
 	if cmd == nil {
-		t.Fatal("completion should return quit command")
+		t.Fatal("completion should return ping command")
+	}
+
+	msg := commandMessageWithin(t, cmd)
+	ping, ok := msg.(pingMsg)
+	if !ok {
+		t.Fatalf("completion command returned %T, want pingMsg", msg)
+	}
+	updated, quitCmd := model.Update(ping)
+	model = updated.(Model)
+	if !model.done {
+		t.Fatal("model should be done after ping result")
+	}
+	if quitCmd == nil {
+		t.Fatal("ping result should return quit command")
+	}
+	if model.ping != 14*time.Millisecond {
+		t.Fatalf("ping = %s, want 14ms", model.ping)
 	}
 }
 
@@ -155,6 +178,9 @@ func TestSequentialTransitionSchedulesUploadAndNextTick(t *testing.T) {
 		},
 		DownloadProbe: blockingProbe,
 		UploadProbe:   blockingProbe,
+		PingProbe: func(ctx context.Context, url string) (time.Duration, error) {
+			return 12 * time.Millisecond, nil
+		},
 	})
 
 	runCommandAsync(model.Init())
@@ -203,7 +229,10 @@ func TestModelStartsDownloadAndUploadTogetherInSimultaneousMode(t *testing.T) {
 		},
 		DownloadProbe: recordProbe(downloadPhase),
 		UploadProbe:   recordProbe(uploadPhase),
-		Simultaneous:  true,
+		PingProbe: func(ctx context.Context, url string) (time.Duration, error) {
+			return 12 * time.Millisecond, nil
+		},
+		Simultaneous: true,
 	})
 
 	runCommandAsync(model.Init())
@@ -244,6 +273,9 @@ func TestModelCompletesSimultaneousModeAfterSharedWindow(t *testing.T) {
 			total.Add(250_000)
 			<-ctx.Done()
 		},
+		PingProbe: func(ctx context.Context, url string) (time.Duration, error) {
+			return 16 * time.Millisecond, nil
+		},
 		Simultaneous: true,
 	})
 
@@ -257,12 +289,26 @@ func TestModelCompletesSimultaneousModeAfterSharedWindow(t *testing.T) {
 	updated, cmd := model.Update(tickMsg(now))
 	model = updated.(Model)
 
-	if !model.done {
-		t.Fatal("model should be done after the shared measurement window")
+	if model.done {
+		t.Fatal("model should wait for ping before finishing")
 	}
 
 	if cmd == nil {
-		t.Fatal("completion should return quit command")
+		t.Fatal("completion should return ping command")
+	}
+
+	msg := commandMessageWithin(t, cmd)
+	ping, ok := msg.(pingMsg)
+	if !ok {
+		t.Fatalf("completion command returned %T, want pingMsg", msg)
+	}
+	updated, quitCmd := model.Update(ping)
+	model = updated.(Model)
+	if !model.done {
+		t.Fatal("model should be done after ping result")
+	}
+	if quitCmd == nil {
+		t.Fatal("ping result should return quit command")
 	}
 }
 
@@ -330,6 +376,25 @@ func TestViewSeparatesDownloadAndUploadWithBlankLine(t *testing.T) {
 	}
 
 	t.Fatalf("download line not found in view %q", view)
+}
+
+func TestViewShowsPingAfterCompletion(t *testing.T) {
+	t.Parallel()
+
+	model := NewModel([]string{"https://oca.example.com/speedtest?token=test"})
+	model.download.speed = 76.3
+	model.download.peak = 102
+	model.download.speeds = []float64{20, 76.3}
+	model.upload.speed = 84.5
+	model.upload.peak = 162
+	model.upload.speeds = []float64{30, 84.5}
+	model.ping = 12 * time.Millisecond
+	model.done = true
+
+	view := model.View()
+	if !strings.Contains(view, "ping 12ms") {
+		t.Fatalf("view = %q, want ping readout", view)
+	}
 }
 
 func TestConfigFromArgsEnablesSimultaneousMode(t *testing.T) {

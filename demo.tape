@@ -29,5 +29,5 @@ Type "fast"
 Sleep 750ms
 Enter
 
-# Let the sequential download and upload tests run and settle
-Sleep 20s
+# Let the sequential download, upload, and final ping readout settle
+Sleep 22s
