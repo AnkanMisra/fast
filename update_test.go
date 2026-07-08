@@ -187,6 +187,7 @@ func TestUpdateCheckerFetchLatestRelease(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[
+			{"tag_name":"v2.0.0","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v2.0.0","created_at":"2026-07-07T10:30:00Z"},
 			{"tag_name":"v0.1.5","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v0.1.5","created_at":"2026-07-07T09:00:00Z"},
 			{"tag_name":"v0.2.0","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v0.2.0","created_at":"2026-07-07T08:00:00Z"},
 			{"tag_name":"not-a-version","html_url":"https://github.com/AnkanMisra/fast/releases/tag/not-a-version","created_at":"2026-07-07T10:00:00Z"}
@@ -207,6 +208,52 @@ func TestUpdateCheckerFetchLatestRelease(t *testing.T) {
 	}
 	if release.HTMLURL == "" {
 		t.Fatal("HTMLURL should be set")
+	}
+}
+
+func TestUpdateCheckerFetchLatestReleaseIgnoresUnsupportedMajor(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"tag_name":"v2.0.0","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v2.0.0","created_at":"2026-07-07T10:30:00Z"},
+			{"tag_name":"v1.9.9","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v1.9.9","created_at":"2026-07-07T08:00:00Z"}
+		]`))
+	}))
+	defer server.Close()
+
+	checker := newUpdateChecker(versionInfo{Kind: versionKindRelease, Version: "v0.1.0"})
+	checker.client = server.Client()
+	checker.releasesURL = server.URL + "/releases?per_page=100"
+
+	release, err := checker.fetchLatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("fetchLatestRelease returned error: %v", err)
+	}
+	if release.TagName != "v1.9.9" {
+		t.Fatalf("TagName = %q, want v1.9.9", release.TagName)
+	}
+}
+
+func TestUpdateCheckerFetchLatestReleaseReturnsErrorWhenOnlyUnsupportedMajorsRemain(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"tag_name":"v2.0.0","html_url":"https://github.com/AnkanMisra/fast/releases/tag/v2.0.0","created_at":"2026-07-07T10:30:00Z"}
+		]`))
+	}))
+	defer server.Close()
+
+	checker := newUpdateChecker(versionInfo{Kind: versionKindRelease, Version: "v0.1.0"})
+	checker.client = server.Client()
+	checker.releasesURL = server.URL + "/releases?per_page=100"
+
+	_, err := checker.fetchLatestRelease(context.Background())
+	if err == nil {
+		t.Fatal("fetchLatestRelease should fail when no installable release exists")
 	}
 }
 

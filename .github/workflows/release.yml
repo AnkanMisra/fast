@@ -48,8 +48,8 @@ jobs:
 
       - name: Validate release tag
         run: |
-          if ! printf '%s\n' "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "release tag must match vMAJOR.MINOR.PATCH" >&2
+          if ! printf '%s\n' "${GITHUB_REF_NAME}" | grep -Eq '^v(0|1)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "release tag must match installable v0/v1 semver without leading zeroes" >&2
             exit 1
           fi
 

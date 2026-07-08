@@ -95,6 +95,9 @@ func (u *updateChecker) notice(state updateState) (string, bool) {
 		HTMLURL:   state.LatestHTMLURL,
 		CreatedAt: state.LatestCreatedAt,
 	}
+	if !isSupportedReleaseTag(release.TagName) {
+		return "", false
+	}
 	if !u.version.isOutdated(release) {
 		return "", false
 	}
@@ -187,7 +190,7 @@ func (u *updateChecker) fetchLatestRelease(ctx context.Context) (latestRelease, 
 		}
 
 		for _, release := range releases {
-			if release.Draft || release.Prerelease || !semver.IsValid(release.TagName) {
+			if release.Draft || release.Prerelease || !isSupportedReleaseTag(release.TagName) {
 				continue
 			}
 			if !found || semver.Compare(release.TagName, best.TagName) > 0 {
@@ -204,7 +207,7 @@ func (u *updateChecker) fetchLatestRelease(ctx context.Context) (latestRelease, 
 	}
 
 	if !found {
-		return latestRelease{}, fmt.Errorf("no published semver release found")
+		return latestRelease{}, fmt.Errorf("no published installable release found")
 	}
 	return best, nil
 }
@@ -278,4 +281,16 @@ func nextPageURL(linkHeader string) string {
 		return part[start+1 : end]
 	}
 	return ""
+}
+
+func isSupportedReleaseTag(tag string) bool {
+	if !semver.IsValid(tag) {
+		return false
+	}
+	switch semver.Major(tag) {
+	case "v0", "v1":
+		return true
+	default:
+		return false
+	}
 }
