@@ -1,0 +1,53 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go test ./...
+
+      - name: Build Windows executable
+        if: runner.os == 'Windows'
+        run: go build -o fast.exe .
+
+      - name: Test Windows cmd.exe command syntax
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          set PATH=%CD%;%PATH%
+          fast --version
+          set FAST_NO_UPDATE_NOTIFIER=1 && fast --version
+
+      - name: Test Windows PowerShell command syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:Path = "$PWD;$env:Path"
+          $env:FAST_NO_UPDATE_NOTIFIER="1"; fast --version

@@ -6,7 +6,9 @@ Test your internet speed from the command-line, powered by [fast.com](https://fa
 
 ### Usage
 
-```bash
+Run a speed test:
+
+```sh
 fast
 ```
 
@@ -14,21 +16,21 @@ fast
 nearest Netflix Open Connect servers, then shows the final ping to that server,
 all inline in your terminal.
 
-To run a full-duplex stress test instead, measure both directions at once:
+Run a full-duplex stress test:
 
-```bash
+```sh
 fast --simultaneous
 ```
 
-To print the installed version:
+Print the installed version:
 
-```bash
+```sh
 fast --version
 ```
 
 ### Installation
 
-Install with Go:
+Install or update with Go:
 
 ```sh
 go install github.com/AnkanMisra/fast@latest
@@ -41,12 +43,38 @@ Or download a binary from the [releases](https://github.com/AnkanMisra/fast/rele
 `fast` checks GitHub Releases at most once every 24 hours during interactive
 runs and lets you know when a newer version is available.
 
-Set `FAST_NO_UPDATE_NOTIFIER=1` to disable update checks and notices.
+Disable update checks for one run on macOS/Linux:
+
+```sh
+FAST_NO_UPDATE_NOTIFIER=1 fast
+```
+
+Disable update checks for one run on Windows PowerShell:
+
+```powershell
+$env:FAST_NO_UPDATE_NOTIFIER="1"; fast
+```
+
+Disable update checks for one run on Windows cmd.exe:
+
+```bat
+set FAST_NO_UPDATE_NOTIFIER=1 && fast
+```
+
+To verify the command without running a speed test, use `fast --version`:
+
+```bat
+set FAST_NO_UPDATE_NOTIFIER=1 && fast --version
+```
 
 ### Releasing
 
-Create a semver tag like `v0.1.0` and push it to GitHub to publish fresh
-binaries and checksums through the release workflow.
+Create and push a semver tag to publish fresh binaries and checksums:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## License
 
